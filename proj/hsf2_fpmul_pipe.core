@@ -1,0 +1,80 @@
+CAPI=2:
+name: hasunosora:arith:fpmul_pipe:0.1a0
+description: Pipelined Parameterized Precision Floating Point Multiplier
+
+filesets:
+  include:
+    files:
+      - include/hsf2_macros.svh:
+          is_include_file: true
+    file_type: systemVerilogSource
+  pkg:
+    depend:
+      - ">=hasunosora:infra:include:0.1a0"
+      - ">=hasunosora:infra:typedefs_pkg:0.1a0"
+    files:
+      - pkg/hsf2_typedef_pkg.sv
+    file_type: systemVerilogSource
+  rtl:
+    depend:
+      - ">=hasunosora:infra:include:0.1a0"
+      - ">=hasunosora:infra:typedefs_pkg:0.1a0"
+      - ">=hasunosora:dpath:skid_buffer:0.1a0"
+      - ">=hasunosora:math:basic_pkg:0.1a1"
+    files:
+      - rtl/alu/hsf2_alu.sv
+      - rtl/alu/hsf2_bvd.sv
+      - rtl/alu/hsf2_cmul.sv
+      - rtl/alu/hsf2_exp_extract.sv
+      - rtl/alu/hsf2_exp_sum.sv
+      - rtl/alu/hsf2_hblzc.sv
+      - rtl/alu/hsf2_sp_result_gen.sv
+      - rtl/common/hsf2_grs_rshift.sv
+      - rtl/common/hsf2_lshift.sv
+      - rtl/postproc/hsf2_grs_round.sv
+      - rtl/postproc/hsf2_postproc.sv
+      - rtl/renorm/hsf2_renorm.sv
+      - rtl/hsf2_fpmul_pipe.sv
+    file_type: systemVerilogSource
+  cocotb:
+    files:
+      - tb/cocotb/hsf2_wrapper_test.py : {file_type: user, copyto: .}
+      - tb/cocotb/FloatingPoint.py : {file_type: user, copyto: .}
+      - tb/cocotb/FpMultiplierAgent.py : {file_type: user, copyto: .}
+      - tb/cocotb/FpMultiplierScoreboard.py : {file_type: user, copyto: .}
+      - tb/cocotb/FpMultiplierTestbench.py : {file_type: user, copyto: .}
+      - tb/cocotb/FpMultiplierTransactions.py : {file_type: user, copyto: .}
+  sim_script:
+    files:
+      - tb/script/xrun.tcl
+    file_type: tclSource
+  
+targets:
+  default: &default
+    filesets:
+      - include
+      - pkg
+      - rtl
+  sim:
+    <<: *default
+    filesets_append:
+      - cocotb
+      - sim_script
+    default_tool: xcelium
+    toplevel: hsf2_fpmul_pipe
+    tools:
+      xcelium:
+        xrun_options:
+          - -64bit
+          - -sv
+          - -access +rwc -accessreg +rwc
+          - -debug -classlinedebug -linedebug -source_debug -plidebug -fsmdebug
+          - -ml_uvm -uvmlinedebug -uvmaccess
+          - +define+USE_DEFAULT_NETTYPE_WIRE
+          - -date -dumpstack -negdelay
+          - -lwdgen
+          - -delay_mode zero
+          - -sequdp_nba_delay
+          - -coverage all -covoverwrite -covtest hsf2_fpmul_pipe
+    description: Cocotb verification of this IP"
+
