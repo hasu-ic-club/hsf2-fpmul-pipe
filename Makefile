@@ -1,40 +1,98 @@
-# Makefile for FuseSoC project
-export TESTCASE
+SHELL := /bin/bash
+.SHELLFLAGS := -eu -o pipefail -c
+.ONESHELL:
+.DEFAULT_GOAL := run
 
-CORE   ?= hasunosora:arith:fpmul_pipe:0.1a0
+FUSESOC ?= fusesoc
+CORE ?= hasunosora:arith:fpmul_pipe:0.2
 TARGET ?= sim
-TOOL   ?= xcelium
-MODULE ?= hsf2_wrapper_test
+BUILD_ROOT ?= build/cocotb
+EXPONENT_WIDTH ?= 8
+MANTISSA_WIDTH ?= 23
+FP_ROUND_MODE ?= 0
 
-FUSESOC      = fusesoc
-FUSESOC_ARGS = run --target $(TARGET) --build --tool $(TOOL)
+# Exponent:mantissa pairs. Mode 0/1/2/3 is RNE/RTZ/RTP/RTN.
+FORMATS ?= 8:23 5:10 8:7 4:3 5:2 1:3 2:2 3:1 3:6 8:70
+ROUND_MODES ?= 0 1 2 3
 
-CORE_DIR = $(subst :,_,$(CORE))
-SIM_PATH = $(TARGET)-$(TOOL)
+work_root := $(abspath $(BUILD_ROOT)/$(TARGET)/e$(EXPONENT_WIDTH)m$(MANTISSA_WIDTH)r$(FP_ROUND_MODE))
 
-BUILD_PATH = $(shell pwd)/build/$(CORE_DIR)/$(SIM_PATH)
-FIX_MAKE   = $(BUILD_PATH)/Makefile
+.PHONY: run regression
+run:
+	@case "$(FP_ROUND_MODE)" in
+	    0|1|2|3) ;;
+	    *) echo "FP_ROUND_MODE must be 0, 1, 2, or 3." >&2; exit 2 ;;
+	esac
+	mkdir -p "$(work_root)"
+	exec 9>"$(work_root)/.lock"
+	flock 9
 
-export VIRTUAL_ENV=/opt/fusesoc/
+	export COCOTB_TOPLEVEL=hsf2_cocotb_duv_top
+	export COCOTB_TEST_MODULES=hsf2_wrapper_test
+	export COCOTB_RESULTS_FILE="$(work_root)/results.xml"
+	export HSF2_EXPONENT_WIDTH="$(EXPONENT_WIDTH)"
+	export HSF2_MANTISSA_WIDTH="$(MANTISSA_WIDTH)"
+	export HSF2_ROUND_MODE="$(FP_ROUND_MODE)"
+	libpython="$$(cocotb-config --libpython)"
+	pygpi_entry="$$(cocotb-config --pygpi-entry-point)"
+	export GPI_USERS="$$libpython;$$pygpi_entry"
+	cocotb_python="$$(cocotb-config --python-bin)"
+	export PYGPI_PYTHON_BIN="$$cocotb_python"
+	: > "$$COCOTB_RESULTS_FILE"
 
-fusesoc_build:
-	@echo "Building the FuseSoC Project"
-	$(FUSESOC) $(FUSESOC_ARGS) $(CORE)
+	# Edalize 0.6.8 emits this option even for Xcelium releases older than 25.
+	xrun_version="$$(xrun -version)"
+	flow_make_options=()
+	if [[ "$$xrun_version" =~ [[:space:]]([0-9][0-9])\.[0-9][0-9] ]] &&
+	    (( 10#$${BASH_REMATCH[1]} < 25 )); then
+	    hsf2_xrun_compat() {
+	        local -a args=()
+	        local arg
+	        for arg in "$$@"; do
+	            if [[ "$$arg" != -enable_cmdline_define_redefinition ]]; then
+	                args+=("$$arg")
+	            fi
+	        done
+	        command "$${args[@]}"
+	    }
+	    export -f hsf2_xrun_compat
+	    flow_make_options=("--flow_make_options=SHELL=/bin/bash EDALIZE_LAUNCHER=hsf2_xrun_compat")
+	fi
 
-fix: fusesoc_build 
-	@echo "Fixing the Makefile"
-	@sed -i '/^all:/,$$d' "$(FIX_MAKE)"
-	@echo "TOPLEVEL_LANG ?= verilog" >> "$(FIX_MAKE)"
-	@echo "SIM ?= $(TOOL)" >> "$(FIX_MAKE)"
-	@echo "COCOTB_HDL_TIMEUNIT = 1ns" >> "$(FIX_MAKE)"
-	@echo "COCOTB_HDL_TIMEPRECISION = 1ps" >> "$(FIX_MAKE)"
-	@echo "EXTRA_ARGS = -f edalize_main.f" >> "$(FIX_MAKE)"
-	@echo "SIM_ARGS += \$$(XRUN_OPTIONS)" >> "$(FIX_MAKE)"
-	@echo "MODULE = $(MODULE)" >> "$(FIX_MAKE)"
-	@echo "include \$$(shell cocotb-config --makefile)/Makefile.sim" >> "$(FIX_MAKE)" 
+	stages=()
+	if [[ "$(TARGET)" == sim_debug ]]; then
+	    stages=(--setup --build)
+	fi
+	$(FUSESOC) --config fusesoc.conf run "$${stages[@]}" --target "$(TARGET)" \
+	    --work-root "$(work_root)" "$(CORE)" "$${flow_make_options[@]}" \
+	    --EXPONENT_WIDTH="$(EXPONENT_WIDTH)" --MANTISSA_WIDTH="$(MANTISSA_WIDTH)" \
+	    --FP_ROUND_MODE="$(FP_ROUND_MODE)"
 
-	@echo "Makefile updated"
+	# The Flow API's xrun -R does not forward -input to the simulation step.
+	if [[ "$(TARGET)" == sim_debug ]]; then
+	    (cd "$(work_root)" && xrun -64bit -R -input xrun_debug.tcl)
+	fi
 
-run: fusesoc_build fix
-	@cd $(BUILD_PATH) && make TESTCASE=$(TESTCASE)
+	if [[ ! -s "$$COCOTB_RESULTS_FILE" ]]; then
+	    echo "cocotb did not write results to $$COCOTB_RESULTS_FILE" >&2
+	    exit 1
+	fi
+	"$$cocotb_python" - "$$COCOTB_RESULTS_FILE" <<'PY'
+	from pathlib import Path
+	import sys
 
+	from cocotb_tools.check_results import get_results
+
+	results = Path(sys.argv[1])
+	tests, failures = get_results(results)
+	print(f"{results}: {tests} tests, {failures} failures")
+	sys.exit(int(tests == 0 or failures != 0))
+	PY
+
+regression:
+	+@for format in $(FORMATS); do
+	    for mode in $(ROUND_MODES); do
+	        $(MAKE) --no-print-directory run EXPONENT_WIDTH="$${format%:*}" \
+	            MANTISSA_WIDTH="$${format#*:}" FP_ROUND_MODE="$$mode"
+	    done
+	done

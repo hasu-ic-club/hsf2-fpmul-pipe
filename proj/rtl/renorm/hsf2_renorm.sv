@@ -1,33 +1,38 @@
 //+FHDR--------------------------------------------------------------------
 // Copyright (C) 2025 Hasunosora IC Design Club
 // MIT License
-// Permission is hereby granted, free of charge, to any person obtaining a 
-// copy of this design and associated documentation files (the “Design”), 
-// to deal in the Design without restriction, including without limitation 
-// the rights to use, copy, modify, merge, publish, distribute, sublicense, 
-// and/or sell copies of the Design, and to permit persons to whom the 
+// Permission is hereby granted, free of charge, to any person obtaining a
+// copy of this design and associated documentation files (the “Design”),
+// to deal in the Design without restriction, including without limitation
+// the rights to use, copy, modify, merge, publish, distribute, sublicense,
+// and/or sell copies of the Design, and to permit persons to whom the
 // Design is furnished to do so, subject to the following conditions:
-// The above copyright notice and this permission notice shall be included 
+// The above copyright notice and this permission notice shall be included
 // in all copies or substantial portions of the Design.
 //
-// THE DESIGN IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, 
-// EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF 
-// MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. 
-// IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, 
-// DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, 
-// TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE 
+// THE DESIGN IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND,
+// EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+// MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+// IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+// DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+// TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
 // DESIGN OR THE USE OR OTHER DEALINGS IN THE DESIGN.
 //-------------------------------------------------------------------------
 // FILE NAME: hsf2_renorm.sv
 // AUTHOR:    Onodera Tsusaki
 // EMAIL:     apertureelectronic@outlook.com
 //-------------------------------------------------------------------------
-// RELEASE VERSION: 0.1a0
-// VERSION DESCRIPTION: First Edition
+// RELEASE VERSION: 0.2
+// VERSION DESCRIPTION: Corner-cases fixed Edition
 //-------------------------------------------------------------------------
 // RELEASES:
 // VERSION    AUTHOR        RELEASE DATE  DESCRIPTION
 // 0.1a0      O. Tsusaki    2025/12/2     First Edition
+// 0.2        O. Tsusaki    2026/11/23    Remove the overflow determination
+//                                        and move them to post-proc stage.
+//                                        Renorm stage only provides finite
+//                                        overflow flag.
+//                                        Hold the sign for zero result.
 //-------------------------------------------------------------------------
 // PURPOSE: Re-normalize stage for pipelined floating point multiplier
 //
@@ -87,8 +92,6 @@ typedef struct packed
 
 // Normalization overflow flag (carry out)
 logic                    norm_ovfl;
-logic                    rexp_at_edge;
-logic                    ovfl_to_inf;
 rexp_t                   rexp_carried;
 
 // Right normalization (right shift)
@@ -105,12 +108,11 @@ fp_exp_t                 result_exp;
 // Normalization overflow detection
 //  If the product has a carry out, we should right shift the mantissa 1 bit,
 //  and increase the result exponent
-//  Note: If the result exponent is already the EDGE_EXPONENT, the result will
-//        overflow to infinity
+// Note: We do not confirm overflow directly now in 0.2 fix. 
+//       Renorm stage only provides 'infinite overflow' flag,
+//       and the post-proc stage will determine the overflow by rounding mode.
 assign norm_ovfl                    = flags_in.prod_cout;
-assign rexp_at_edge                 = prod_exp_in == EDGE_REXP;
-assign ovfl_to_inf                  = norm_ovfl && rexp_at_edge;
-assign rexp_carried                 = prod_exp_in + (norm_ovfl ? rexp_t'('sd1) : rexp_t'('sd0));
+assign rexp_carried                 = rexp_t'(prod_exp_in) + (norm_ovfl ? rexp_t'('sd1) : rexp_t'('sd0));
 
 // Right normalization
 //  1. If the result has carry out, we need right shift 1 bit for normalization
@@ -146,18 +148,22 @@ grs_rshift_inst
 
 assign mant_ralign                  = carry_mant_rsft_out.ext_mant;
 
+// Add in 0.2
+// Finite overflow
+assign flags_out.finite_ovfl        = !flags_in.result_zero && !flags_in.result_nan
+    && !flags_in.result_inf && (rexp_carried > EDGE_REXP);
+
 // Result exponent
 assign result_exp                   = (rexp_carried < 'sd1) ? '0 : fp_exp_t'(rexp_carried[$bits(fp_exp_t) - 1:0]);
 
-// Sign, mantissa and exponent output
+// Mantissa and exponent output
+// Fix in 0.2, independent assign for result_sign
 always_comb begin : sp_value_out
     if (flags_in.result_zero) begin
-        flags_out.result_sign = '0;
         mant_result_out       = '0;
         exp_result_out        = '0;
     end
     else begin
-        flags_out.result_sign = flags_in.result_sign;
         mant_result_out       = mant_ralign;
         exp_result_out        = result_exp;
     end
@@ -174,7 +180,9 @@ always_comb begin : grs_out
 end : grs_out
 
 // Flags output
-assign flags_out.result_inf         = flags_in.result_inf || ovfl_to_inf;
+// Fix in 0.2, remove overflow flag and add directly output of sign
+assign flags_out.result_sign        = flags_in.result_sign;
+assign flags_out.result_inf         = flags_in.result_inf;
 assign flags_out.result_nan         = flags_in.result_nan;
 
 endmodule : hsf2_renorm

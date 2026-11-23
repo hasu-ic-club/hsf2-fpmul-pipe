@@ -1,76 +1,100 @@
-import random
-from random import randint
-
-import cocotb
-from cocotb.clock import Clock
-from cocotb.queue import Queue
-from cocotb.triggers import RisingEdge, ReadOnly
+from cocotb.triggers import FallingEdge, ReadOnly, RisingEdge
 
 from FpMultiplierTransactions import FpMultiplierOperandInputTransaction, FpMultiplierResultOutputTransaction
+
+
+def _logic(port):
+    value = port.value
+    assert value.is_resolvable, f"{port._name} has unresolved value {value}"
+    return int(value)
 
 
 class FpMultiplierOperandInputDriver:
     def __init__(self, duv):
         self.duv = duv
 
-    async def sendOne(self, item : FpMultiplierOperandInputTransaction):
-        self.duv.op_a_in.value = item.operandA
-        self.duv.op_b_in.value = item.operandB
-        self.duv.op_valid.value = 1
+    def drive(self, item: FpMultiplierOperandInputTransaction | None):
+        self.duv.op_valid.value = int(item is not None)
+        if item is not None:
+            self.duv.op_a_in.value = item.op_a
+            self.duv.op_b_in.value = item.op_b
 
-        while True:
-            await RisingEdge(self.duv.clk)
-            if self.duv.op_ready.value == 1:
-                break
+    def is_ready(self):
+        return _logic(self.duv.op_ready)
 
-        self.duv.op_valid.value = 0
-
-    async def sendStream(self, vecs: list[FpMultiplierOperandInputTransaction]):
-        for item in vecs:
-            self.duv.op_a_in.value = item.operandA
-            self.duv.op_b_in.value = item.operandB
-            self.duv.op_valid.value = 1
-
-            while True:
-                await RisingEdge(self.duv.clk)
-                if self.duv.op_ready.value == 1:
-                    break
-
-        self.duv.op_valid.value = 0
 
 class FpMultiplierResultOutputMonitor:
-    def __init__(self, duv, enableBackpressure=True, backpressureRate=0.3):
+    def __init__(self, duv):
         self.duv = duv
 
-        self.enableBackpressure = enableBackpressure
-        self.backpressureRate = backpressureRate
+    def drive_ready(self, ready):
+        self.duv.result_ready.value = int(ready)
 
-        self.collectedQueue = Queue()
+    def is_valid(self):
+        return _logic(self.duv.result_valid)
 
-    async def run(self):
-        self.duv.result_ready.value = 1
-
-        while True:
-            await RisingEdge(self.duv.clk)
-
-            if self.enableBackpressure:
-                self.duv.result_ready.value = 1 if random.random() < self.backpressureRate else 0
-
-            if self.duv.result_ready.value == 1 and self.duv.result_valid.value == 1:
-                result = int(self.duv.result_out.value)
-                exception = self.duv.exception_out.value
-                isNaN = self.duv.nan_out.value
-                isInf = self.duv.inf_out.value
-
-                transaction = FpMultiplierResultOutputTransaction(result, exception, isNaN, isInf)
-                await self.collectedQueue.put(transaction)
+    def sample(self):
+        if not self.is_valid():
+            return None
+        return FpMultiplierResultOutputTransaction(
+            _logic(self.duv.result_out),
+            _logic(self.duv.exception_out),
+            _logic(self.duv.nan_out),
+            _logic(self.duv.inf_out),
+        )
 
 
 class FpMultiplierAgent:
-    def __init__(self, duv, enableBackpressure=True, backpressureRate=0.3):
+    def __init__(self, duv, context=""):
         self.duv = duv
-
+        self.context = context
         self.driver = FpMultiplierOperandInputDriver(duv)
-        self.monitor = FpMultiplierResultOutputMonitor(duv, enableBackpressure, backpressureRate)
+        self.monitor = FpMultiplierResultOutputMonitor(duv)
+        self.cycle = 0
+        self.held_input = None
+        self.held_output = None
+        self.duv.op_a_in.value = 0
+        self.duv.op_b_in.value = 0
+        self.driver.drive(None)
+        self.monitor.drive_ready(False)
+        self.duv.aresetn.value = 0
 
-        cocotb.start_soon(self.monitor.run())
+    async def reset(self):
+        await FallingEdge(self.duv.clk)
+        self.duv.aresetn.value = 0
+        self.driver.drive(None)
+        self.monitor.drive_ready(False)
+        await ReadOnly()
+        assert not self.monitor.is_valid(), f"{self.context}: valid stayed high in reset"
+        await RisingEdge(self.duv.clk)
+        await FallingEdge(self.duv.clk)
+        self.duv.aresetn.value = 1
+        await ReadOnly()
+        assert not self.monitor.is_valid(), f"{self.context}: stale output after reset"
+        self.held_input = None
+        self.held_output = None
+
+    async def step(self, inputs=None, ready=True):
+        input_bits = inputs.as_tuple() if inputs is not None else None
+        if self.held_input is not None:
+            assert input_bits == self.held_input, (
+                f"{self.context}: input changed during stall at cycle {self.cycle + 1}"
+            )
+
+        await FallingEdge(self.duv.clk)
+        self.driver.drive(inputs)
+        self.monitor.drive_ready(ready)
+        await ReadOnly()
+        # Capture stable signals before the rising edge consumes them.
+        accepted = inputs is not None and bool(self.driver.is_ready())
+        output = self.monitor.sample()
+        output_bits = output.as_tuple() if output is not None else None
+        if self.held_output is not None:
+            assert output_bits == self.held_output, (
+                f"{self.context}: output changed during stall at cycle {self.cycle + 1}"
+            )
+        self.held_input = None if accepted else input_bits
+        self.held_output = None if ready else output_bits
+        await RisingEdge(self.duv.clk)
+        self.cycle += 1
+        return accepted, output

@@ -22,12 +22,16 @@
 // AUTHOR:    Onodera Tsusaki
 // EMAIL:     apertureelectronic@outlook.com
 //-------------------------------------------------------------------------
-// RELEASE VERSION: 0.1a0
-// VERSION DESCRIPTION: First Edition
+// RELEASE VERSION: 0.2
+// VERSION DESCRIPTION: Corner-cases fixed Edition
 //-------------------------------------------------------------------------
 // RELEASES:
 // VERSION    AUTHOR        RELEASE DATE  DESCRIPTION
 // 0.1a0      O. Tsusaki    2025/12/2     First Edition
+// 0.2        O. Tsusaki    2026/11/23    Remove the early determination of 
+//                                        underflow and overflow. 
+//                                        These flags should be finalized 
+//                                        during the post-processing stage.
 //-------------------------------------------------------------------------
 // PURPOSE: Exponent summary (signed real exponent) for floating-point multiplier
 //
@@ -50,7 +54,6 @@
 // Exponent summary (signed real exponent) for floating-point multiplier
 module hsf2_exp_sum
 #(
-    parameter  int MANTISSA_WIDTH = 23,
     parameter  int EXPONENT_WIDTH = 8,
     parameter  int REXP_WIDTH     = 9,
     `LP_MODULE int EXP_SUM_WIDTH = REXP_WIDTH + 2
@@ -59,9 +62,7 @@ module hsf2_exp_sum
     input  logic signed [REXP_WIDTH - 1:0]    rexp_a_in,
     input  logic signed [REXP_WIDTH - 1:0]    rexp_b_in,
 
-    output logic signed [EXP_SUM_WIDTH - 1:0] prod_exp,
-    output logic                              udfl,
-    output logic                              ovfl
+    output logic signed [EXP_SUM_WIDTH - 1:0] prod_exp
 );
 
 typedef logic signed [EXP_SUM_WIDTH - 1:0] sexp_t;
@@ -72,9 +73,6 @@ sexp_t rexp_a;
 sexp_t rexp_b;
 sexp_t prod_exp_int;
 
-sexp_t udfl_bound;  // Underflow bound, if result's exponent less than this ties it to 0
-sexp_t ovfl_bound;  // Overflow bound, if result's exponent greater than this ties it to infinity
-
 // Extend the signed exponent
 assign offset       = sexp_t'((1 << (EXPONENT_WIDTH - 1)) - 1);
 assign rexp_a       = sexp_t'(rexp_a_in);
@@ -83,12 +81,5 @@ assign rexp_b       = sexp_t'(rexp_b_in);
 // Product exponent = expA + expB - offset
 assign prod_exp_int = rexp_a + rexp_b - offset;
 assign prod_exp     = prod_exp_int;
-
-// Underflow / overflow check
-assign udfl_bound   = -(MANTISSA_WIDTH + 1);
-assign ovfl_bound   = (1 << EXPONENT_WIDTH) - 2;
-
-assign udfl         = prod_exp_int < udfl_bound;
-assign ovfl         = prod_exp_int > ovfl_bound;
 
 endmodule : hsf2_exp_sum

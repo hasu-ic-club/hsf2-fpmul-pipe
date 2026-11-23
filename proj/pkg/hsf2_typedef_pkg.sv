@@ -22,12 +22,14 @@
 // AUTHOR:    Onodera Tsusaki
 // EMAIL:     apertureelectronic@outlook.com
 //-------------------------------------------------------------------------
-// RELEASE VERSION: 0.1a0
-// VERSION DESCRIPTION: First Edition
+// RELEASE VERSION: 0.2
+// VERSION DESCRIPTION: Edition to fix corner case bugs.
 //-------------------------------------------------------------------------
 // RELEASES:
 // VERSION    AUTHOR        RELEASE DATE  DESCRIPTION
 // 0.1a0      O. Tsusaki    2025/12/2     First Edition
+// 0.2        O. Tsusaki    2026/11/23    Add flag signal 'finite_overflow'
+//                                        between renorm and post-proc stage.
 //-------------------------------------------------------------------------
 // PURPOSE: Type definitions for pipelined floating point multiplier
 //
@@ -73,6 +75,7 @@ package hsf2_typedef_pkg;
         logic result_sign;
         logic result_inf;
         logic result_nan;
+        logic finite_ovfl;
         grs_s grs;
     } renorm_flags_s;
 

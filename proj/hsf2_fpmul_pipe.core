@@ -1,5 +1,5 @@
 CAPI=2:
-name: hasunosora:arith:fpmul_pipe:0.1a0
+name: hasunosora:arith:fpmul_pipe:0.2
 description: Pipelined Parameterized Precision Floating Point Multiplier
 
 filesets:
@@ -36,6 +36,10 @@ filesets:
       - rtl/renorm/hsf2_renorm.sv
       - rtl/hsf2_fpmul_pipe.sv
     file_type: systemVerilogSource
+  cocotb_wrapper:
+    files:
+      - tb/hsf2_cocotb_duv_top.sv
+    file_type: systemVerilogSource
   cocotb:
     files:
       - tb/cocotb/hsf2_wrapper_test.py : {file_type: user, copyto: .}
@@ -48,7 +52,12 @@ filesets:
     files:
       - tb/script/xrun.tcl
     file_type: tclSource
-  
+
+parameters:
+  EXPONENT_WIDTH: {datatype: int, paramtype: vlogparam, default: 8}
+  MANTISSA_WIDTH: {datatype: int, paramtype: vlogparam, default: 23}
+  FP_ROUND_MODE: {datatype: int, paramtype: vlogparam, default: 0}
+
 targets:
   default: &default
     filesets:
@@ -56,25 +65,40 @@ targets:
       - pkg
       - rtl
   sim:
+      <<: *default
+      filesets_append:
+        - cocotb_wrapper
+        - cocotb
+      toplevel: hsf2_cocotb_duv_top
+      flow: sim
+      parameters: &sim_parameters
+        - EXPONENT_WIDTH
+        - MANTISSA_WIDTH
+        - FP_ROUND_MODE
+      flow_options: &xcelium_cocotb
+        tool: xcelium
+        cocotb_module: hsf2_wrapper_test
+        xrun_options:
+          - -timescale
+          - 1ns/1ps
+          - +define+USE_DEFAULT_NETTYPE_WIRE
+      description: Cocotb regression with Xcelium
+  sim_debug:
     <<: *default
     filesets_append:
+      - cocotb_wrapper
       - cocotb
       - sim_script
-    default_tool: xcelium
-    toplevel: hsf2_fpmul_pipe
-    tools:
-      xcelium:
-        xrun_options:
-          - -64bit
-          - -sv
-          - -access +rwc -accessreg +rwc
-          - -debug -classlinedebug -linedebug -source_debug -plidebug -fsmdebug
-          - -ml_uvm -uvmlinedebug -uvmaccess
-          - +define+USE_DEFAULT_NETTYPE_WIRE
-          - -date -dumpstack -negdelay
-          - -lwdgen
-          - -delay_mode zero
-          - -sequdp_nba_delay
-          - -coverage all -covoverwrite -covtest hsf2_fpmul_pipe
-    description: Cocotb verification of this IP"
+    toplevel: hsf2_cocotb_duv_top
+    flow: sim
+    parameters: *sim_parameters
+    flow_options:
+      <<: *xcelium_cocotb
+      xrun_options:
+        - -timescale
+        - 1ns/1ps
+        - +define+USE_DEFAULT_NETTYPE_WIRE
+        - -lwdgen
+        - -coverage all -covoverwrite -covtest hsf2_fpmul_pipe
+    description: Cocotb simulation with waveform and RTL coverage
 

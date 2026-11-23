@@ -1,33 +1,37 @@
 //+FHDR--------------------------------------------------------------------
 // Copyright (C) 2025 Hasunosora IC Design Club
 // MIT License
-// Permission is hereby granted, free of charge, to any person obtaining a 
-// copy of this design and associated documentation files (the “Design”), 
-// to deal in the Design without restriction, including without limitation 
-// the rights to use, copy, modify, merge, publish, distribute, sublicense, 
-// and/or sell copies of the Design, and to permit persons to whom the 
+// Permission is hereby granted, free of charge, to any person obtaining a
+// copy of this design and associated documentation files (the “Design”),
+// to deal in the Design without restriction, including without limitation
+// the rights to use, copy, modify, merge, publish, distribute, sublicense,
+// and/or sell copies of the Design, and to permit persons to whom the
 // Design is furnished to do so, subject to the following conditions:
-// The above copyright notice and this permission notice shall be included 
+// The above copyright notice and this permission notice shall be included
 // in all copies or substantial portions of the Design.
 //
-// THE DESIGN IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, 
-// EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF 
-// MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. 
-// IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, 
-// DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, 
-// TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE 
+// THE DESIGN IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND,
+// EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+// MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+// IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+// DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+// TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
 // DESIGN OR THE USE OR OTHER DEALINGS IN THE DESIGN.
 //-------------------------------------------------------------------------
 // FILE NAME: hsf2_alu.sv
 // AUTHOR:    Onodera Tsusaki
 // EMAIL:     apertureelectronic@outlook.com
 //-------------------------------------------------------------------------
-// RELEASE VERSION: 0.1a0
-// VERSION DESCRIPTION: First Edition
+// RELEASE VERSION: 0.2
+// VERSION DESCRIPTION: Corner-cases fixed Edition
 //-------------------------------------------------------------------------
 // RELEASES:
 // VERSION    AUTHOR        RELEASE DATE  DESCRIPTION
 // 0.1a0      O. Tsusaki    2025/12/2     First Edition
+// 0.2        O. Tsusaki    2026/11/23    Remove the early determination of
+//                                        underflow and overflow.
+//                                        Use padded full product to provide
+//                                        GRS bits when mantissa width is small
 //-------------------------------------------------------------------------
 // PURPOSE: Arithmetic logic unit (stage) for pipelined floating point multiplier
 //
@@ -86,6 +90,7 @@ localparam                                  PROD_STICKY_MSB   = PROD_ROUND_BIT -
 typedef logic [LZC_WIDTH - 1:0] lzc_t;
 typedef logic signed [REXP_WIDTH - 1:0] rexp_t;
 typedef logic signed [REXP_SUM_WIDTH - 1:0] prod_rexp_t;
+typedef logic [$bits(fp_prod_mant_t) - 1 + 2:0] fp_prod_mant_pad_t;
 
 // FP format structure
 fp_s                                        op_a_fp;
@@ -113,6 +118,7 @@ fp_ext_mant_t                               frcn_mant_b;
 
 // Product result (full product)
 fp_prod_mant_t                              prod_mant;
+fp_prod_mant_pad_t                          prod_mant_padded;
 
 // Real exponent
 rexp_t                                      rexp_a;
@@ -120,8 +126,6 @@ rexp_t                                      rexp_b;
 
 // Real exponent summary
 prod_rexp_t                                 prod_exp;
-logic                                       prod_ovfl;
-logic                                       prod_udfl;
 
 // Assign input operators to FP format
 assign op_a_fp                        = fp_s'(op_a_in);
@@ -212,13 +216,19 @@ cmul_inst
     .result_out(prod_mant  )
 );
 
+// Add and fix in 0.2, use padded full product to provide
+// GRS bits when mantissa width is small
+// When M = 2, sticky bit should be 0 and round bit should be prod_mant[0]
+// When M >= 3, round and sticky are extracted from valid product result
+assign prod_mant_padded               = {prod_mant, 2'b00};
+
 // Assign result product mantissa, carry out and GRS bits
 always_comb begin : prod_result_assign
     flags_out.prod_cout  = prod_mant[PROD_COUT_BIT];
     prod_mant_out        = prod_mant[PROD_EXT_MANT_MSB -: $bits(fp_ext_mant_t)];
     flags_out.grs.guard  = prod_mant[PROD_GUARD_BIT];
-    flags_out.grs.round  = prod_mant[PROD_ROUND_BIT];
-    flags_out.grs.sticky = |prod_mant[PROD_STICKY_MSB:0];
+    flags_out.grs.round  = prod_mant_padded[PROD_ROUND_BIT + 2];
+    flags_out.grs.sticky = |prod_mant_padded[PROD_STICKY_MSB + 2:0];
 end : prod_result_assign
 
 // The product result of two mantissas
@@ -258,7 +268,6 @@ exp_b_extract_inst
 
 // Exponent summary
 hsf2_exp_sum #(
-    .MANTISSA_WIDTH(MANTISSA_WIDTH),
     .EXPONENT_WIDTH(EXPONENT_WIDTH),
     .REXP_WIDTH    (REXP_WIDTH    )
 )
@@ -266,15 +275,14 @@ rexp_sum_inst
 (
     .rexp_a_in(rexp_a   ),
     .rexp_b_in(rexp_b   ),
-    .prod_exp (prod_exp ),
-    .udfl     (prod_udfl),
-    .ovfl     (prod_ovfl)
+    .prod_exp (prod_exp )
 );
 
 assign prod_exp_out                   = prod_exp;
 
 // Special value flags
-assign flags_out.result_inf           = prod_ovfl || sr_pre_inf;
-assign flags_out.result_zero          = prod_udfl || sr_pre_zero;
+// Fix in 0.2, remove the early determination of underflow and overflow
+assign flags_out.result_inf           = sr_pre_inf;
+assign flags_out.result_zero          = sr_pre_zero;
 
 endmodule : hsf2_alu

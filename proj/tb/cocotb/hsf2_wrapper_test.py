@@ -1,194 +1,302 @@
-import random
-import numpy as np
+"""Parameterized HSF2 regression for a single elaborated DUT.
+
+The launcher selects E, M, and the rounding mode. HSF2_EXPONENT_WIDTH,
+HSF2_MANTISSA_WIDTH, and HSF2_ROUND_MODE can supply parameters hidden by VPI.
+HSF2_SEED, HSF2_RANDOM_CASES, and HSF2_EXHAUSTIVE_BITS control run size.
+"""
+
 import logging
+import os
+import random
+from dataclasses import dataclass
+from itertools import chain, product
 
 import cocotb
 import pytest
 from cocotb.clock import Clock
 
-from FpMultiplierTestbench import FpMultiplierTestbench
-from FpMultiplierTransactions import FpMultiplierOperandInputTransaction
-import FloatingPoint
+from FloatingPoint import FloatingPoint, FloatingPointRoundingMode as Rounding
+from FpMultiplierTestbench import FpMultiplierTestbench, PIPELINE_LATENCY
+from FpMultiplierTransactions import FpMultiplierOperandInputTransaction as InputTransaction
 
-def genResultVectors(duv, opVectors : list):
-    resultTestVectors = []
-    for opVec in opVectors:
-        # Use the reference model to compute expected result
-        mantissaBits = int(duv.MANTISSA_WIDTH.value)
-        exponentBits = int(duv.EXPONENT_WIDTH.value)
 
-        fpA = FloatingPoint.FloatingPoint(mantissaBits, exponentBits)
-        fpB = FloatingPoint.FloatingPoint(mantissaBits, exponentBits)
+LOG = logging.getLogger(f"cocotb.{__name__}")
+TIMEOUT = {"timeout_time": 50, "timeout_unit": "ms"}
 
-        fpA.setBinary(opVec.operandA)
-        fpB.setBinary(opVec.operandB)
 
-        fpResult = fpA * fpB
-        resultTestVectors.append((fpA, fpB, fpResult))
-    return resultTestVectors
+def _mode_number(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        name = str(value).split("::")[-1].removeprefix("FP_ROUND_MODE_")
+        if name == "TIES_TO_EVEN":
+            return Rounding.NEAREST_EVEN.value
+        try:
+            return Rounding[name].value
+        except KeyError as error:
+            raise ValueError(f"Unknown rounding mode {value!r}") from error
 
-@cocotb.test()
-async def verySimpleTest(duv):
-    tb = FpMultiplierTestbench(duv, False)
 
-    # Prepare simple test vectors
-    opVector = [1.0, 1.5, -1.5, 2.5]
-    opTestVectors = []
-    for a in opVector:
-        for b in opVector:
-            fpA = FloatingPoint.FloatingPoint.fromFloat32(a)
-            fpB = FloatingPoint.FloatingPoint.fromFloat32(b)
-            opInVec = FpMultiplierOperandInputTransaction(fpA.getBinary(), fpB.getBinary())
-            opTestVectors.append(opInVec)
-    
-    resultTestVectors = genResultVectors(duv, opTestVectors)
-    
-    # Start the clock and reset the core
-    cocotb.start_soon(Clock(duv.clk, 10, units="ns").start())
-    await tb.reset()
+def _parameter(dut, name, env, parse=int):
+    configured = os.getenv(env)
+    setting = parse(configured) if configured is not None else None
+    try:
+        actual = parse(getattr(dut, name).value)
+    except (AttributeError, TypeError, ValueError) as error:
+        if setting is not None:
+            return setting
+        raise AssertionError(f"Cannot read {name} from DUT. Set {env} to its elaborated value.") from error
+    assert setting is None or actual == setting, f"{name}={actual} disagrees with {env}={setting}"
+    return actual
 
-    # Send test vectors to the DUV via the agent
-    await tb.sendVectors(opTestVectors, resultTestVectors)
 
-@cocotb.test()
-async def randomBinaryTest(duv):
-    log = logging.getLogger("cocotb.tb")
-    log.setLevel(logging.DEBUG)
+@dataclass(frozen=True)
+class Format:
+    e: int
+    m: int
+    mode: Rounding
 
-    numTests = 1000
-    random.seed(42)
+    @property
+    def width(self):
+        return 1 + self.e + self.m
 
-    tb = FpMultiplierTestbench(duv, False)
+    @property
+    def exp_max(self):
+        return (1 << self.e) - 1
 
-    # Get DUV parameters
-    mantissaBits = int(duv.MANTISSA_WIDTH.value)
-    exponentBits = int(duv.EXPONENT_WIDTH.value)
-    totalBits = 1 + exponentBits + mantissaBits
+    @property
+    def hidden(self):
+        return 1 << self.m
 
-    log.info(f"Floating point format: FP{totalBits}(E{exponentBits}M{mantissaBits})")
+    @property
+    def sign_bit(self):
+        return 1 << (self.e + self.m)
 
-    # Generate random binary test vectors
-    opTestVectors = []
-    for i in range(numTests):
-        opA = random.getrandbits(totalBits)
-        opB = random.getrandbits(totalBits)
-        opInVec = FpMultiplierOperandInputTransaction(opA, opB)
+    @property
+    def inf(self):
+        return self.exp_max << self.m
 
-        opTestVectors.append(opInVec)
+    def power(self, biased_exp):
+        if 1 <= biased_exp < self.exp_max:
+            return biased_exp << self.m
+        if 1 - self.m <= biased_exp <= 0:
+            return self.hidden >> (1 - biased_exp)
+        return 0
 
-    resultTestVectors = genResultVectors(duv, opTestVectors)
 
-    # Start the clock and reset the core
-    cocotb.start_soon(Clock(duv.clk, 10, units="ns").start())
-    await tb.reset()
+def _read_format(dut):
+    fmt = Format(
+        _parameter(dut, "EXPONENT_WIDTH", "HSF2_EXPONENT_WIDTH"),
+        _parameter(dut, "MANTISSA_WIDTH", "HSF2_MANTISSA_WIDTH"),
+        Rounding(_parameter(dut, "FP_ROUND_MODE", "HSF2_ROUND_MODE", _mode_number)),
+    )
+    assert 1 <= fmt.e <= 32 and 1 <= fmt.m <= 128, f"Unsupported RTL format {fmt}"
+    for port in (dut.op_a_in, dut.op_b_in, dut.result_out):
+        assert len(port) == fmt.width, f"Port width {len(port)} disagrees with {fmt}"
+    return fmt
 
-    # Send test vectors to the DUV via the agent
-    await tb.sendVectors(opTestVectors, resultTestVectors)
 
-@cocotb.test()
-async def randomFloatTest(duv):
-    log = logging.getLogger("cocotb.tb")
-    log.setLevel(logging.DEBUG)
+def _integer_oracle(fmt, a, b):
+    """Exact integer multiplication for formats wider than 64 bits."""
+    mag_mask = fmt.sign_bit - 1
+    x, y = a & mag_mask, b & mag_mask
+    sign = (a ^ b) & fmt.sign_bit
+    toward_negative = fmt.mode == Rounding.TOWARD_NEGATIVE
 
-    numTests = 1000
-    random.seed(1234)
+    if x > fmt.inf or y > fmt.inf or (x == fmt.inf and y == 0) or (y == fmt.inf and x == 0):
+        return fmt.inf | 1
+    if x == fmt.inf or y == fmt.inf:
+        return sign | fmt.inf
+    if x == 0 or y == 0:
+        return sign
 
-    tb = FpMultiplierTestbench(duv, False)
+    exp_x, mantissa_x = divmod(x, fmt.hidden)
+    exp_y, mantissa_y = divmod(y, fmt.hidden)
+    if exp_x:
+        mantissa_x |= fmt.hidden
+    if exp_y:
+        mantissa_y |= fmt.hidden
+    exp_x, exp_y = max(1, exp_x), max(1, exp_y)
+    exact = mantissa_x * mantissa_y
+    product_exp = exp_x + exp_y - fmt.exp_max // 2
+    exponent = max(1, product_exp + exact.bit_length() - 1 - 2 * fmt.m)
+    shift = exponent - product_exp + fmt.m
+    outward = (
+        (fmt.mode == Rounding.TOWARD_POSITIVE and not sign)
+        or (toward_negative and bool(sign))
+    )
+    if shift > exact.bit_length():
+        # The nonzero product is below half the smallest subnormal.
+        return sign | int(outward)
 
-    # Get DUV parameters
-    mantissaBits = int(duv.MANTISSA_WIDTH.value)
-    exponentBits = int(duv.EXPONENT_WIDTH.value)
-    totalBits = 1 + exponentBits + mantissaBits
+    scale = 1 << max(0, shift)
+    mantissa, remainder = divmod(exact << max(0, -shift), scale)
+    if fmt.mode == Rounding.NEAREST_EVEN:
+        twice = remainder * 2
+        increment = twice > scale or (twice == scale and bool(mantissa & 1))
+    else:
+        increment = outward and remainder != 0
+    mantissa += int(increment)
+    if mantissa >= 2 * fmt.hidden:
+        mantissa >>= 1
+        exponent += 1
+    if mantissa < fmt.hidden:
+        exponent = 0
+    if exponent >= fmt.exp_max:
+        return sign | (fmt.inf if fmt.mode == Rounding.NEAREST_EVEN or outward else fmt.inf - 1)
+    return sign | (exponent << fmt.m) | (mantissa & (fmt.hidden - 1))
 
-    log.info(f"Floating point format: FP{totalBits}(E{exponentBits}M{mantissaBits})")
 
-    # Generate random float test vectors
-    opTestVectors = []
-    for i in range(numTests):
-        a = np.float32(random.uniform(-1, 1) * np.finfo(np.float32).max)
-        b = np.float32(random.uniform(-1, 1) * np.finfo(np.float32).max)
+def _expected(fmt, a, b):
+    if fmt.width > 64:
+        return _integer_oracle(fmt, a, b)
+    x = FloatingPoint(fmt.m, fmt.e, a)
+    y = FloatingPoint(fmt.m, fmt.e, b)
+    return FloatingPoint.mul(x, y, fmt.mode).get_binary()
 
-        fpA = FloatingPoint.FloatingPoint.fromFloat32(a)
-        fpB = FloatingPoint.FloatingPoint.fromFloat32(b)
 
-        opInVec = FpMultiplierOperandInputTransaction(fpA.getBinary(), fpB.getBinary())
-        opTestVectors.append(opInVec)
-    
-    resultTestVectors = genResultVectors(duv, opTestVectors)
+def _make_testbench(dut, fmt=None):
+    if fmt is None:
+        fmt = _read_format(dut)
+    seed = int(os.getenv("HSF2_SEED", "42"), 0)
+    context = f"E={fmt.e} M={fmt.m} mode={fmt.mode.name} seed={seed}"
+    bench = FpMultiplierTestbench(
+        dut, en_backpressure=False, exponent_width=fmt.e, mantissa_width=fmt.m,
+        predictor=lambda a, b: _expected(fmt, a, b), seed=seed, context=context,
+    )
+    Clock(dut.clk, 10, unit="ns").start(start_high=False)
+    oracle = "FloatingPoint" if fmt.width <= 64 else "exact integer"
+    LOG.info("%s oracle=%s", context, oracle)
+    return bench, fmt, seed
 
-    # Start the clock and reset the core
-    cocotb.start_soon(Clock(duv.clk, 10, units="ns").start())
-    await tb.reset()
 
-    # Send test vectors to the DUV via the agent
-    await tb.sendVectors(opTestVectors, resultTestVectors)
+def _directed_vectors(fmt):
+    largest = fmt.inf - 1
+    magnitudes = {0, 1, fmt.hidden - 1, largest, fmt.inf, fmt.inf | 1, fmt.inf | (fmt.hidden - 1)}
+    if fmt.exp_max > 1:
+        magnitudes.update((fmt.hidden, fmt.hidden + 1, largest - 1))
+        one = fmt.power(fmt.exp_max // 2)
+        magnitudes.update((one - 1, one, one + 1))
+    signed = sorted(magnitudes | {value | fmt.sign_bit for value in magnitudes})
+    for a, b in product(signed, repeat=2):
+        yield InputTransaction(a, b)
 
-@cocotb.test()
-async def specialValuesTest(duv):
-    log = logging.getLogger("cocotb.tb")
-    log.setLevel(logging.DEBUG)
+    if fmt.exp_max == 1:
+        return
+    bias = fmt.exp_max // 2
+    half, one, two = (fmt.power(bias + offset) for offset in (-1, 0, 1))
+    edge = (fmt.exp_max - 1) << fmt.m
+    half_mantissa = fmt.hidden >> 1
+    pairs = {
+        (largest, two),
+        (edge | half_mantissa, one | half_mantissa),
+        (edge | 1, two - 2),
+        (fmt.hidden, one - 1),
+        (fmt.hidden, half),
+        (1, half - 1), (1, half), (1, half + 1),
+        (one | 1, one | half_mantissa),
+    }
+    for (a, b), sign_a, sign_b in product(sorted(pairs), (0, fmt.sign_bit), (0, fmt.sign_bit)):
+        yield InputTransaction(a | sign_a, b | sign_b)
+        yield InputTransaction(b | sign_b, a | sign_a)
 
-    tb = FpMultiplierTestbench(duv, False)
 
-    # Get DUV parameters
-    mantissaBits = int(duv.MANTISSA_WIDTH.value)
-    exponentBits = int(duv.EXPONENT_WIDTH.value)
-    totalBits = 1 + exponentBits + mantissaBits
+def _random_finite_vectors(fmt, rng, count):
+    max_exp = fmt.exp_max - 1
+    bias = fmt.exp_max // 2
+    edges = sorted({0, min(1, max_exp), bias, max(0, max_exp - 1), max_exp})
+    product_exponents = (-fmt.m - 1, -fmt.m, 0, 1, max_exp, max_exp + 1)
+    for index in range(count):
+        exp_a = rng.randint(0, max_exp)
+        exp_b = rng.randint(0, max_exp)
+        sign_a = rng.choice((0, fmt.sign_bit))
+        sign_b = rng.choice((0, fmt.sign_bit))
+        if index % 4 == 1:
+            exp_a, exp_b = rng.choice(edges), rng.choice(edges)
+        elif index % 4 == 2:
+            exp_b = max(0, min(max_exp, bias + rng.choice(product_exponents) - max(1, exp_a)))
+        elif index % 4 == 3:
+            exp_b = max(0, min(max_exp, 2 * bias - max(1, exp_a)))
+        a = (exp_a << fmt.m) | rng.getrandbits(fmt.m)
+        b = (exp_b << fmt.m) | rng.getrandbits(fmt.m)
+        yield InputTransaction(a | sign_a, b | sign_b)
 
-    log.info(f"Floating point format: FP{totalBits}(E{exponentBits}M{mantissaBits})")
 
-    # Prepare special value test vectors
-    fpZero = np.float32(0)
-    fpOne = np.float32(1)
+def _random_count():
+    count = int(os.getenv("HSF2_RANDOM_CASES", "20000"), 0)
+    assert count > 0, "HSF2_RANDOM_CASES must be positive"
+    return count
 
-    specialFpValues = [
-        np.float32(0.0),    # 0
-        np.float32(-0.0),
-        np.float32(1.0),    # 1
-        np.float32(-1.0),
-        np.float32(np.nextafter(fpZero, np.inf)),    # +denorm min
-        np.float32(np.nextafter(fpZero, -np.inf)),   # -denorm min
-        np.float32(np.finfo(np.float32).tiny),  # +norm min
-        np.float32(-np.finfo(np.float32).tiny), # -norm min
-        np.float32(np.finfo(np.float32).max),   # +norm max
-        np.float32(-np.finfo(np.float32).max),  # -norm max
-        np.float32(np.inf), # +inf
-        np.float32(-np.inf), # -inf
-        np.float32(np.nan), # NaN
-        np.float32(np.nextafter(fpOne, np.inf)),  # 1 + epsilon
-        np.float32(np.nextafter(fpOne, -np.inf)), # 1 - epsilon
+
+@cocotb.test(**TIMEOUT)
+async def directed_extremes(dut):
+    bench, fmt, _ = _make_testbench(dut)
+    await bench.reset()
+    await bench.run(_directed_vectors(fmt))
+
+
+@cocotb.test(**TIMEOUT)
+async def random_binary(dut):
+    bench, fmt, seed = _make_testbench(dut)
+    rng = random.Random(seed ^ 0x42494E)
+    vectors = (InputTransaction(rng.getrandbits(fmt.width), rng.getrandbits(fmt.width))
+               for _ in range(_random_count()))
+    await bench.reset()
+    await bench.run(vectors)
+
+
+@cocotb.test(**TIMEOUT)
+async def random_finite(dut):
+    bench, fmt, seed = _make_testbench(dut)
+    rng = random.Random(seed ^ 0x46494E)
+    await bench.reset()
+    await bench.run(_random_finite_vectors(fmt, rng, _random_count()),
+                    source_probability=0.85, ready_probability=0.70)
+
+
+@cocotb.test(**TIMEOUT)
+async def exhaustive_small(dut):
+    fmt = _read_format(dut)
+    limit = int(os.getenv("HSF2_EXHAUSTIVE_BITS", "8"), 0)
+    assert 0 <= limit <= 10, "HSF2_EXHAUSTIVE_BITS must be between 0 and 10"
+    if fmt.width > limit:
+        pytest.skip(f"{fmt.width} bits exceeds the {limit}-bit exhaustive limit")
+    bench, _, _ = _make_testbench(dut, fmt)
+    await bench.reset()
+    await bench.run(InputTransaction(a, b) for a, b in product(range(1 << fmt.width), repeat=2))
+
+
+@cocotb.test(**TIMEOUT)
+async def flow_control(dut):
+    bench, fmt, seed = _make_testbench(dut)
+    stall_vectors = [
+        InputTransaction(fmt.inf, 0), InputTransaction(fmt.inf, fmt.inf | fmt.sign_bit),
+        InputTransaction(1, 1), InputTransaction(1, 0),
     ]
 
-    opTestVectors = []
-    for a in specialFpValues:
-        for b in specialFpValues:
-            fpA = FloatingPoint.FloatingPoint.fromFloat32(a)
-            fpB = FloatingPoint.FloatingPoint.fromFloat32(b)
-            opInVec = FpMultiplierOperandInputTransaction(fpA.getBinary(), fpB.getBinary())
-            opTestVectors.append(opInVec)
+    await bench.reset()
+    await bench.run(_random_finite_vectors(fmt, random.Random(seed), 32))
+    assert bench.scoreboard.checked == 32 and bench.stalled_input == 0, bench.context
+    assert bench.first_output - bench.first_input == PIPELINE_LATENCY, bench.context
+    assert bench.last_output - bench.first_output + 1 == bench.scoreboard.checked, bench.context
 
-    resultTestVectors = genResultVectors(duv, opTestVectors)
+    await bench.reset()
+    vectors = iter(stall_vectors)
+    pending = next(vectors)
+    for _ in range(12):
+        if await bench.step(pending, ready=False):
+            pending = next(vectors, None)
+    assert bench.accepted == PIPELINE_LATENCY and bench.stalled_input and bench.stalled_output, bench.context
+    await bench.run(chain(vectors, (InputTransaction(0, 0),)), held_input=pending)
+    assert bench.scoreboard.checked == len(stall_vectors) + 1, bench.context
 
-    # Start the clock and reset the core
-    cocotb.start_soon(Clock(duv.clk, 10, units="ns").start())
-    await tb.reset()
-
-    # Send test vectors to the DUV via the agent
-    await tb.sendVectors(opTestVectors, resultTestVectors)
-
-# Parameterized test with different formats
-# Format   | Mantissa Bits | Exponent Bits
-# ----------------------------------------
-# FP32     | 23            | 8
-# FP16     | 10            | 5
-# BF16     | 7             | 8
-# FP8 E4M3 | 3             | 4
-# FP8 E5M2 | 2             | 5
-# @pytest.mark.parameterize("fpFormat", [(23, 8), (10, 5), (7, 8), (3, 4), (2, 5)])
-# def testFpAdder(fpFormat):
-#     parameters = {
-#         "MANTISSA_BITS": fpFormat[0],
-#         "EXPONENT_BITS": fpFormat[1],
-#     }
-#
-#     pass
+    await bench.reset()
+    for vector in stall_vectors[:PIPELINE_LATENCY]:
+        assert await bench.step(vector, ready=False), bench.context
+    assert bench.scoreboard.pending == PIPELINE_LATENCY and bench.scoreboard.checked == 0, bench.context
+    await bench.reset()
+    await bench.run([
+        InputTransaction(0, 0), InputTransaction(1 | fmt.sign_bit, 0),
+        InputTransaction(fmt.inf | 1, 1),
+    ])
+    assert bench.scoreboard.checked == 3, bench.context

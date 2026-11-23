@@ -22,12 +22,14 @@
 // AUTHOR:    Onodera Tsusaki
 // EMAIL:     apertureelectronic@outlook.com
 //-------------------------------------------------------------------------
-// RELEASE VERSION: 0.1a0
-// VERSION DESCRIPTION: First Edition
+// RELEASE VERSION: 0.2
+// VERSION DESCRIPTION: Corner-cases fixed Edition
 //-------------------------------------------------------------------------
 // RELEASES:
 // VERSION    AUTHOR        RELEASE DATE  DESCRIPTION
 // 0.1a0      O. Tsusaki    2025/12/2     First Edition
+// 0.2        O. Tsusaki    2026/11/23    Fix the behaviour of the shifter 
+//                                        when the data width is small
 //-------------------------------------------------------------------------
 // PURPOSE: Unsigned left shifter (binary shifter)
 //
@@ -71,7 +73,7 @@ vld_sft_t      vld_sft;
 data_t         bsft_data            [SFT_STAGES + 1];
 
 // Valid shift amount truncate
-assign vld_sft      = sft_in[VLD_SFT_AMOUNT_WIDTH - 1:0];
+assign vld_sft      = VLD_SFT_AMOUNT_WIDTH'($unsigned(sft_in));
 
 // Input layer
 assign bsft_data[0] = data_in;

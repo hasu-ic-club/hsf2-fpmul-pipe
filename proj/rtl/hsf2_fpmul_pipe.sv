@@ -22,12 +22,16 @@
 // AUTHOR:    Onodera Tsusaki
 // EMAIL:     apertureelectronic@outlook.com
 //-------------------------------------------------------------------------
-// RELEASE VERSION: 0.1a0
-// VERSION DESCRIPTION: First Edition
+// RELEASE VERSION: 0.2
+// VERSION DESCRIPTION: Corner-cases fixed Edition
 //-------------------------------------------------------------------------
 // RELEASES:
 // VERSION    AUTHOR        RELEASE DATE  DESCRIPTION
 // 0.1a0      O. Tsusaki    2025/12/2     First Edition
+// 0.2        O. Tsusaki    2026/11/23    Fix some corner cases in 
+//                                        different rounding modes.
+//                                        Verficated by using new 
+//                                        parameterized regression test.
 //-------------------------------------------------------------------------
 // PURPOSE: Pipelined floating-point multiplier
 //

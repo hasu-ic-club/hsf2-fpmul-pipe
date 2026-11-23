@@ -22,12 +22,14 @@
 // AUTHOR:    Onodera Tsusaki
 // EMAIL:     apertureelectronic@outlook.com
 //-------------------------------------------------------------------------
-// RELEASE VERSION: 0.1a0
-// VERSION DESCRIPTION: First Edition
+// RELEASE VERSION: 0.2
+// VERSION DESCRIPTION: Corner-cases fixed Edition
 //-------------------------------------------------------------------------
 // RELEASES:
 // VERSION    AUTHOR        RELEASE DATE  DESCRIPTION
-// 0.1a0      O. Tsusaki    2025/12/3     First edition cloned from hsf2_grs_rshift
+// 0.1a0      O. Tsusaki    2025/12/3     First edition cloned from hsf1_grs_rshift
+// 0.2        O. Tsusaki    2026/11/23    Fix the behaviour of the shifter 
+//                                        when the data width is small
 //-------------------------------------------------------------------------
 // PURPOSE: Unsigned right shifter with GRS rounding bit recording
 //
@@ -81,7 +83,8 @@ logic                                       bsft_sticky          [SFT_STAGES + 1
 logic                                       sticky_large_sft;
 
 // Valid shift amount truncate
-assign vld_sft          = sft_in[VLD_SFT_AMOUNT_WIDTH - 1:0];
+// Fix on 0.2, the bit-width of sft-in may smaller than the VLD_SFT_AMOUNT_WIDTH
+assign vld_sft          = VLD_SFT_AMOUNT_WIDTH'($unsigned(sft_in));
 
 // Determination of very large shift out (fast path)
 `GENERATE_START

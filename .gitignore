@@ -26,3 +26,9 @@ build
 # FPGA project files
 fpga/*
 !fpga/*.prj
+
+# AI agent files
+AGENTS.md
+CLAUDE.md
+.repowise/
+.serena/
